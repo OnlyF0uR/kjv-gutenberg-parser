@@ -1,15 +1,32 @@
 use bincode::{Decode, Encode};
-use std::collections::BTreeMap;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 
-type VerseMap = BTreeMap<String, String>; // verse_number -> text
-type ChapterMap = BTreeMap<String, VerseMap>; // chapter_number -> verses
+#[derive(Encode, Decode, Serialize, Deserialize, Clone)]
+struct Verse {
+    number: String,
+    text: String,
+}
 
-#[derive(Encode, Decode)]
+#[derive(Encode, Decode, Serialize, Deserialize, Clone)]
+struct Chapter {
+    number: String,
+    verses: Vec<Verse>,
+}
+
+#[derive(Encode, Decode, Serialize, Deserialize, Clone)]
+struct Book {
+    name: String,
+    chapters: Vec<Chapter>,
+}
+
+#[derive(Encode, Decode, Serialize, Deserialize)]
 struct Bible {
-    ot: BTreeMap<String, ChapterMap>, // Old Testament
-    nt: BTreeMap<String, ChapterMap>, // New Testament
+    ot_contents: Vec<String>, // Old Testament table of contents
+    ot: Vec<Book>,            // Old Testament
+    nt_contents: Vec<String>, // New Testament table of contents
+    nt: Vec<Book>,            // New Testament
 }
 
 fn is_book_line(line: &str) -> Option<(String, bool)> {
@@ -43,10 +60,13 @@ fn is_book_line(line: &str) -> Option<(String, bool)> {
         "Haggai" => return Some(("Haggai".to_string(), true)),
         "Zechariah" => return Some(("Zechariah".to_string(), true)),
         "Malachi" => return Some(("Malachi".to_string(), true)),
+        "Ezra" => return Some(("Ezra".to_string(), true)),
+        "Ecclesiastes" => return Some(("Ecclesiastes".to_string(), true)),
         _ => {} // Continue to check prefixes
     }
 
     // Old Testament books - checking in order with flexible matching
+    // Only match if the line STARTS with the prefix (not just contains it)
     let ot_books = [
         ("The First Book of Moses:", "Genesis"),
         ("The Second Book of Moses:", "Exodus"),
@@ -58,13 +78,11 @@ fn is_book_line(line: &str) -> Option<(String, bool)> {
         ("The Book of Ruth", "Ruth"),
         ("The First Book of the Chronicles", "1 Chronicles"),
         ("The Second Book of the Chronicles", "2 Chronicles"),
-        ("Ezra", "Ezra"),
         ("The Book of Nehemiah", "Nehemiah"),
         ("The Book of Esther", "Esther"),
         ("The Book of Job", "Job"),
         ("The Book of Psalms", "Psalms"),
         ("The Proverbs", "Proverbs"),
-        ("Ecclesiastes", "Ecclesiastes"),
         ("The Song of Solomon", "Song of Solomon"),
         ("The Book of the Prophet Isaiah", "Isaiah"),
         ("The Book of the Prophet Jeremiah", "Jeremiah"),
@@ -159,17 +177,22 @@ fn is_book_line(line: &str) -> Option<(String, bool)> {
 
 fn parse_gutenberg(txt: &str) -> Bible {
     let mut bible = Bible {
-        ot: BTreeMap::new(),
-        nt: BTreeMap::new(),
+        ot_contents: Vec::new(),
+        nt_contents: Vec::new(),
+        ot: Vec::new(),
+        nt: Vec::new(),
     };
 
-    let mut current_book = String::new();
+    let mut current_book: Option<Book> = None;
     let mut is_ot = true;
-    let mut current_chapter = String::new();
-    let mut current_verse_num = String::new();
-    let mut current_verse_text = String::new();
+    let mut current_chapter: Option<Chapter> = None;
+    let mut current_verse: Option<Verse> = None;
 
     let mut in_bible = false;
+    let mut in_content = false; // Skip table of contents
+    let mut in_toc = false; // Track if we're in the table of contents
+    let mut toc_is_ot = true; // Track which testament's TOC we're in
+    let mut toc_complete = false; // Track when we've finished collecting TOC
     let mut found_books = std::collections::HashSet::new();
     let mut last_line_was_book = false;
 
@@ -187,54 +210,110 @@ fn parse_gutenberg(txt: &str) -> Bible {
             continue;
         }
 
+        // Detect start of table of contents
+        if !in_toc && !in_content && line.contains("The Old Testament") {
+            in_toc = true;
+            toc_is_ot = true;
+            continue;
+        }
+
+        if in_toc && line.contains("The New Testament") {
+            toc_is_ot = false;
+            continue;
+        }
+
+        // Collect table of contents entries while in TOC
+        if in_toc && !toc_complete {
+            if let Some((book_name, _)) = is_book_line(line) {
+                if toc_is_ot {
+                    bible.ot_contents.push(book_name);
+                } else {
+                    bible.nt_contents.push(book_name);
+                }
+
+                // Check if we've collected all books (39 OT + 27 NT)
+                if bible.ot_contents.len() == 39 && bible.nt_contents.len() == 27 {
+                    toc_complete = true;
+                    eprintln!(
+                        "TOC complete: {} OT and {} NT entries",
+                        bible.ot_contents.len(),
+                        bible.nt_contents.len()
+                    );
+                }
+            }
+            continue;
+        }
+
+        // After TOC is complete, look for the content section marker
+        if toc_complete && !in_content {
+            if line.contains("The Old Testament") {
+                in_content = true;
+                in_toc = false;
+                eprintln!("Content section starts");
+                continue;
+            }
+            continue;
+        }
+
+        // Now we're in content - process normally
+        if !in_content {
+            continue;
+        }
+
         // Check for book line first
-        if let Some((book, is_old_testament)) = is_book_line(line) {
+        if let Some((book_name, is_old_testament)) = is_book_line(line) {
             // Handle Kings/Samuel edge case
-            if last_line_was_book && (book == "1 Kings" || book == "2 Kings") {
-                eprintln!("Skipping {} as it's part of Samuel header", book);
+            if last_line_was_book && (book_name == "1 Kings" || book_name == "2 Kings") {
+                eprintln!("Skipping {} as it's part of Samuel header", book_name);
                 continue;
             }
 
-            if (book == "1 Kings" || book == "2 Kings")
-                && current_book.contains("Samuel")
-                && current_verse_num.is_empty()
+            if (book_name == "1 Kings" || book_name == "2 Kings")
+                && current_book
+                    .as_ref()
+                    .map_or(false, |b| b.name.contains("Samuel"))
+                && current_verse.is_none()
             {
                 eprintln!(
                     "Preventing switch from {} to {} (no verses yet)",
-                    current_book, book
+                    current_book.as_ref().unwrap().name,
+                    book_name
                 );
                 continue;
             }
 
-            if !found_books.contains(&book) {
-                eprintln!("Found new book: '{}' from line: '{}'", book, line);
-                found_books.insert(book.clone());
+            if !found_books.contains(&book_name) {
+                eprintln!("Found new book: '{}' from line: '{}'", book_name, line);
+                found_books.insert(book_name.clone());
             } else {
-                eprintln!("Re-encountered book: '{}' from line: '{}'", book, line);
+                eprintln!("Re-encountered book: '{}' from line: '{}'", book_name, line);
             }
 
             // Save previous verse if exists
-            if !current_verse_num.is_empty()
-                && !current_book.is_empty()
-                && !current_verse_text.is_empty()
-            {
-                let testament_map = if is_ot { &mut bible.ot } else { &mut bible.nt };
-                testament_map
-                    .entry(current_book.clone())
-                    .or_insert_with(BTreeMap::new)
-                    .entry(current_chapter.clone())
-                    .or_insert_with(BTreeMap::new)
-                    .insert(
-                        current_verse_num.clone(),
-                        current_verse_text.trim().to_string(),
-                    );
+            if let Some(verse) = current_verse.take() {
+                if let Some(chapter) = current_chapter.as_mut() {
+                    chapter.verses.push(verse);
+                }
             }
 
-            current_book = book;
+            // Save previous chapter if exists
+            if let Some(chapter) = current_chapter.take() {
+                if let Some(book) = current_book.as_mut() {
+                    book.chapters.push(chapter);
+                }
+            }
+
+            // Save previous book if exists
+            if let Some(book) = current_book.take() {
+                let testament = if is_ot { &mut bible.ot } else { &mut bible.nt };
+                testament.push(book);
+            }
+
+            current_book = Some(Book {
+                name: book_name,
+                chapters: Vec::new(),
+            });
             is_ot = is_old_testament;
-            current_chapter.clear();
-            current_verse_num.clear();
-            current_verse_text.clear();
             last_line_was_book = true;
             continue;
         }
@@ -251,37 +330,49 @@ fn parse_gutenberg(txt: &str) -> Bible {
                     // Found a verse reference!
 
                     // First, save the previous verse if we have one
-                    if !current_verse_num.is_empty() && !current_book.is_empty() {
+                    if let Some(mut verse) = current_verse.take() {
                         // Append any text before this verse reference to the current verse
                         if i > 0 {
-                            if !current_verse_text.is_empty() {
-                                current_verse_text.push(' ');
+                            if !verse.text.is_empty() {
+                                verse.text.push(' ');
                             }
-                            current_verse_text.push_str(&words[..i].join(" "));
+                            verse.text.push_str(&words[..i].join(" "));
                         }
 
-                        let testament_map = if is_ot { &mut bible.ot } else { &mut bible.nt };
-                        testament_map
-                            .entry(current_book.clone())
-                            .or_insert_with(BTreeMap::new)
-                            .entry(current_chapter.clone())
-                            .or_insert_with(BTreeMap::new)
-                            .insert(
-                                current_verse_num.clone(),
-                                current_verse_text.trim().to_string(),
-                            );
+                        if let Some(chapter) = current_chapter.as_mut() {
+                            chapter.verses.push(verse);
+                        }
+                    }
+
+                    // Check if we need a new chapter
+                    let chapter_num = ch.to_string();
+                    if current_chapter
+                        .as_ref()
+                        .map_or(true, |c| c.number != chapter_num)
+                    {
+                        // Save the previous chapter if exists
+                        if let Some(chapter) = current_chapter.take() {
+                            if let Some(book) = current_book.as_mut() {
+                                book.chapters.push(chapter);
+                            }
+                        }
+                        current_chapter = Some(Chapter {
+                            number: chapter_num,
+                            verses: Vec::new(),
+                        });
                     }
 
                     // Start the new verse
-                    current_chapter = ch.to_string();
-                    current_verse_num = v.to_string();
-
-                    // Collect text after the verse reference on this line
-                    if i + 1 < words.len() {
-                        current_verse_text = words[i + 1..].join(" ");
+                    let verse_text = if i + 1 < words.len() {
+                        words[i + 1..].join(" ")
                     } else {
-                        current_verse_text = String::new();
-                    }
+                        String::new()
+                    };
+
+                    current_verse = Some(Verse {
+                        number: v.to_string(),
+                        text: verse_text,
+                    });
 
                     found_verse_ref = true;
                     break;
@@ -290,23 +381,34 @@ fn parse_gutenberg(txt: &str) -> Bible {
         }
 
         // If no verse reference found, this is continuation text for current verse
-        if !found_verse_ref && !current_verse_num.is_empty() {
-            if !current_verse_text.is_empty() {
-                current_verse_text.push(' ');
+        if !found_verse_ref {
+            if let Some(verse) = current_verse.as_mut() {
+                if !verse.text.is_empty() {
+                    verse.text.push(' ');
+                }
+                verse.text.push_str(line);
             }
-            current_verse_text.push_str(line);
         }
     }
 
     // Save the last verse
-    if !current_verse_num.is_empty() && !current_book.is_empty() && !current_verse_text.is_empty() {
-        let testament_map = if is_ot { &mut bible.ot } else { &mut bible.nt };
-        testament_map
-            .entry(current_book.clone())
-            .or_insert_with(BTreeMap::new)
-            .entry(current_chapter)
-            .or_insert_with(BTreeMap::new)
-            .insert(current_verse_num, current_verse_text.trim().to_string());
+    if let Some(verse) = current_verse.take() {
+        if let Some(chapter) = current_chapter.as_mut() {
+            chapter.verses.push(verse);
+        }
+    }
+
+    // Save the last chapter
+    if let Some(chapter) = current_chapter.take() {
+        if let Some(book) = current_book.as_mut() {
+            book.chapters.push(chapter);
+        }
+    }
+
+    // Save the last book
+    if let Some(book) = current_book.take() {
+        let testament = if is_ot { &mut bible.ot } else { &mut bible.nt };
+        testament.push(book);
     }
 
     eprintln!(
@@ -314,7 +416,10 @@ fn parse_gutenberg(txt: &str) -> Bible {
         bible.ot.len(),
         bible.nt.len()
     );
-    eprintln!("OT books: {:?}", bible.ot.keys().collect::<Vec<_>>());
+    eprintln!(
+        "OT books: {:?}",
+        bible.ot.iter().map(|b| &b.name).collect::<Vec<_>>()
+    );
 
     bible
 }
@@ -332,6 +437,13 @@ fn write_bible_to_bin(bible: &Bible, path: &str) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+fn write_bible_to_json(bible: &Bible, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let f = File::create(path)?;
+    let writer = BufWriter::new(f);
+    serde_json::to_writer_pretty(writer, bible)?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read the full Gutenberg KJV text file
     let file = File::open("pg10.txt")?;
@@ -342,17 +454,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bible = parse_gutenberg(&txt);
 
     // Debug: Print all book names
-    println!("Parsed {} OT books:", bible.ot.len());
-    for (i, book) in bible.ot.keys().enumerate() {
+    println!(
+        "Table of Contents - OT ({} books):",
+        bible.ot_contents.len()
+    );
+    for (i, book) in bible.ot_contents.iter().enumerate() {
         println!("  {}. {}", i + 1, book);
+    }
+
+    println!(
+        "\nTable of Contents - NT ({} books):",
+        bible.nt_contents.len()
+    );
+    for (i, book) in bible.nt_contents.iter().enumerate() {
+        println!("  {}. {}", i + 1, book);
+    }
+
+    println!("\nParsed {} OT books:", bible.ot.len());
+    for (i, book) in bible.ot.iter().enumerate() {
+        println!("  {}. {}", i + 1, book.name);
     }
 
     println!("\nParsed {} NT books:", bible.nt.len());
-    for (i, book) in bible.nt.keys().enumerate() {
-        println!("  {}. {}", i + 1, book);
+    for (i, book) in bible.nt.iter().enumerate() {
+        println!("  {}. {}", i + 1, book.name);
     }
 
     write_bible_to_bin(&bible, "bible.bin")?;
+    write_bible_to_json(&bible, "bible.json")?;
 
     println!("\nParsed KJV and saved to bible.bin successfully!");
     Ok(())
@@ -361,6 +490,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Helper function to find a book by name
+    fn find_book<'a>(testament: &'a [Book], name: &str) -> &'a Book {
+        testament
+            .iter()
+            .find(|b| b.name == name)
+            .expect(&format!("Book {} not found", name))
+    }
+
+    // Helper function to find a chapter by number
+    fn find_chapter<'a>(book: &'a Book, number: &str) -> &'a Chapter {
+        book.chapters
+            .iter()
+            .find(|c| c.number == number)
+            .expect(&format!("Chapter {} not found in {}", number, book.name))
+    }
+
+    // Helper function to find a verse by number
+    fn find_verse<'a>(chapter: &'a Chapter, number: &str) -> &'a Verse {
+        chapter
+            .verses
+            .iter()
+            .find(|v| v.number == number)
+            .expect(&format!("Verse {} not found", number))
+    }
 
     // if not exists we write the binary
     // yet always return bible
@@ -412,26 +566,33 @@ mod tests {
         let bible = get_bible();
 
         // Verify some known verses
+        let genesis = find_book(&bible.ot, "Genesis");
+        let gen_ch1 = find_chapter(genesis, "1");
+        let gen_1_1 = find_verse(gen_ch1, "1");
         assert_eq!(
-            bible.ot["Genesis"]["1"]["1"],
+            gen_1_1.text,
             "In the beginning God created the heaven and the earth."
         );
 
         // Verify chapter counts
         assert_eq!(
-            bible.ot["Genesis"].len(),
+            genesis.chapters.len(),
             50,
             "Genesis should have 50 chapters"
         );
+
+        let matthew = find_book(&bible.nt, "Matthew");
         assert_eq!(
-            bible.nt["Matthew"].len(),
+            matthew.chapters.len(),
             28,
             "Matthew should have 28 chapters"
         );
 
         // Matthew 3:1
+        let matt_ch3 = find_chapter(matthew, "3");
+        let matt_3_1 = find_verse(matt_ch3, "1");
         assert_eq!(
-            bible.nt["Matthew"]["3"]["1"],
+            matt_3_1.text,
             "In those days came John the Baptist, preaching in the wilderness of Judaea,"
         );
 
@@ -485,21 +646,22 @@ mod tests {
             ("Malachi", 4),
         ];
 
-        for (book, expected_chapters) in &ot_chapters {
-            let actual_chapters = bible.ot[*book].len();
+        for (book_name, expected_chapters) in &ot_chapters {
+            let book = find_book(&bible.ot, book_name);
+            let actual_chapters = book.chapters.len();
             if actual_chapters != *expected_chapters {
                 eprintln!(
                     "\n{} has {} chapters (expected {}). Chapters: {:?}",
-                    book,
+                    book_name,
                     actual_chapters,
                     expected_chapters,
-                    bible.ot[*book].keys().collect::<Vec<_>>()
+                    book.chapters.iter().map(|c| &c.number).collect::<Vec<_>>()
                 );
             }
             assert_eq!(
                 actual_chapters, *expected_chapters,
                 "{} should have {} chapters",
-                book, expected_chapters
+                book_name, expected_chapters
             );
         }
 
@@ -534,12 +696,13 @@ mod tests {
             ("Revelation", 22),
         ];
 
-        for (book, expected_chapters) in &nt_chapters {
+        for (book_name, expected_chapters) in &nt_chapters {
+            let book = find_book(&bible.nt, book_name);
             assert_eq!(
-                bible.nt[*book].len(),
+                book.chapters.len(),
                 *expected_chapters,
                 "{} should have {} chapters",
-                book,
+                book_name,
                 expected_chapters
             );
         }
@@ -552,43 +715,35 @@ mod tests {
         let bible = get_bible();
 
         // Genesis 1 should have 31 verses
-        assert_eq!(
-            bible.ot["Genesis"]["1"].len(),
-            31,
-            "Genesis 1 should have 31 verses"
-        );
+        let genesis = find_book(&bible.ot, "Genesis");
+        let gen_ch1 = find_chapter(genesis, "1");
+        assert_eq!(gen_ch1.verses.len(), 31, "Genesis 1 should have 31 verses");
 
         // Psalm 119 should have 176 verses (longest chapter)
-        assert_eq!(
-            bible.ot["Psalms"]["119"].len(),
-            176,
-            "Psalm 119 should have 176 verses"
-        );
+        let psalms = find_book(&bible.ot, "Psalms");
+        let ps_119 = find_chapter(psalms, "119");
+        assert_eq!(ps_119.verses.len(), 176, "Psalm 119 should have 176 verses");
 
         // John 3 should have 36 verses
-        assert_eq!(
-            bible.nt["John"]["3"].len(),
-            36,
-            "John 3 should have 36 verses"
-        );
+        let john = find_book(&bible.nt, "John");
+        let john_ch3 = find_chapter(john, "3");
+        assert_eq!(john_ch3.verses.len(), 36, "John 3 should have 36 verses");
 
         // Romans 8 should have 39 verses
-        assert_eq!(
-            bible.nt["Romans"]["8"].len(),
-            39,
-            "Romans 8 should have 39 verses"
-        );
+        let romans = find_book(&bible.nt, "Romans");
+        let rom_ch8 = find_chapter(romans, "8");
+        assert_eq!(rom_ch8.verses.len(), 39, "Romans 8 should have 39 verses");
 
         // Matthew 5 (Sermon on the Mount) should have 48 verses
-        assert_eq!(
-            bible.nt["Matthew"]["5"].len(),
-            48,
-            "Matthew 5 should have 48 verses"
-        );
+        let matthew = find_book(&bible.nt, "Matthew");
+        let matt_ch5 = find_chapter(matthew, "5");
+        assert_eq!(matt_ch5.verses.len(), 48, "Matthew 5 should have 48 verses");
 
         // Revelation 22 (last chapter) should have 21 verses
+        let revelation = find_book(&bible.nt, "Revelation");
+        let rev_ch22 = find_chapter(revelation, "22");
         assert_eq!(
-            bible.nt["Revelation"]["22"].len(),
+            rev_ch22.verses.len(),
             21,
             "Revelation 22 should have 21 verses"
         );
@@ -601,62 +756,89 @@ mod tests {
         let bible = get_bible();
 
         // John 3:16 - Most famous verse
+        let john = find_book(&bible.nt, "John");
+        let john_ch3 = find_chapter(john, "3");
+        let john_3_16 = find_verse(john_ch3, "16");
         assert_eq!(
-            bible.nt["John"]["3"]["16"],
+            john_3_16.text,
             "For God so loved the world, that he gave his only begotten Son, that whosoever believeth in him should not perish, but have everlasting life."
         );
 
         // Genesis 1:1 - Opening verse
+        let genesis = find_book(&bible.ot, "Genesis");
+        let gen_ch1 = find_chapter(genesis, "1");
+        let gen_1_1 = find_verse(gen_ch1, "1");
         assert_eq!(
-            bible.ot["Genesis"]["1"]["1"],
+            gen_1_1.text,
             "In the beginning God created the heaven and the earth."
         );
 
         // Psalm 23:1 - The Lord is my shepherd
-        assert_eq!(
-            bible.ot["Psalms"]["23"]["1"],
-            "The LORD is my shepherd; I shall not want."
-        );
+        let psalms = find_book(&bible.ot, "Psalms");
+        let ps_23 = find_chapter(psalms, "23");
+        let ps_23_1 = find_verse(ps_23, "1");
+        assert_eq!(ps_23_1.text, "The LORD is my shepherd; I shall not want.");
 
         // Romans 8:28
+        let romans = find_book(&bible.nt, "Romans");
+        let rom_ch8 = find_chapter(romans, "8");
+        let rom_8_28 = find_verse(rom_ch8, "28");
         assert_eq!(
-            bible.nt["Romans"]["8"]["28"],
+            rom_8_28.text,
             "And we know that all things work together for good to them that love God, to them who are the called according to his purpose."
         );
 
         // Jeremiah 29:11
+        let jeremiah = find_book(&bible.ot, "Jeremiah");
+        let jer_ch29 = find_chapter(jeremiah, "29");
+        let jer_29_11 = find_verse(jer_ch29, "11");
         assert_eq!(
-            bible.ot["Jeremiah"]["29"]["11"],
+            jer_29_11.text,
             "For I know the thoughts that I think toward you, saith the LORD, thoughts of peace, and not of evil, to give you an expected end."
         );
 
         // Philippians 4:13
+        let philippians = find_book(&bible.nt, "Philippians");
+        let phil_ch4 = find_chapter(philippians, "4");
+        let phil_4_13 = find_verse(phil_ch4, "13");
         assert_eq!(
-            bible.nt["Philippians"]["4"]["13"],
+            phil_4_13.text,
             "I can do all things through Christ which strengtheneth me."
         );
 
         // Proverbs 3:5-6 (test verse 5)
+        let proverbs = find_book(&bible.ot, "Proverbs");
+        let prov_ch3 = find_chapter(proverbs, "3");
+        let prov_3_5 = find_verse(prov_ch3, "5");
         assert_eq!(
-            bible.ot["Proverbs"]["3"]["5"],
+            prov_3_5.text,
             "Trust in the LORD with all thine heart; and lean not unto thine own understanding."
         );
 
         // Matthew 28:19 - Great Commission
+        let matthew = find_book(&bible.nt, "Matthew");
+        let matt_ch28 = find_chapter(matthew, "28");
+        let matt_28_19 = find_verse(matt_ch28, "19");
         assert_eq!(
-            bible.nt["Matthew"]["28"]["19"],
+            matt_28_19.text,
             "Go ye therefore, and teach all nations, baptizing them in the name of the Father, and of the Son, and of the Holy Ghost:"
         );
 
         // Isaiah 40:31
+        let isaiah = find_book(&bible.ot, "Isaiah");
+        let isa_ch40 = find_chapter(isaiah, "40");
+        let isa_40_31 = find_verse(isa_ch40, "31");
         assert_eq!(
-            bible.ot["Isaiah"]["40"]["31"],
+            isa_40_31.text,
             "But they that wait upon the LORD shall renew their strength; they shall mount up with wings as eagles; they shall run, and not be weary; and they shall walk, and not faint."
         );
 
         // 1 Corinthians 13:4 - Love chapter
+        let cor1 = find_book(&bible.nt, "1 Corinthians");
+        let cor1_ch13 = find_chapter(cor1, "13");
+        let cor1_13_4 = find_verse(cor1_ch13, "4");
         assert_eq!(
-            bible.nt["1 Corinthians"]["13"]["4"],
+            cor1_13_4.text,
             "Charity suffereth long, and is kind; charity envieth not; charity vaunteth not itself, is not puffed up,"
         );
 
@@ -669,50 +851,55 @@ mod tests {
 
         // Verify that verses have reasonable lengths (not empty, not too short)
         // John 11:35 is the shortest verse: "Jesus wept."
-        let shortest = &bible.nt["John"]["11"]["35"];
-        assert_eq!(shortest, "Jesus wept.");
-        assert!(shortest.len() < 20, "Shortest verse should be very short");
+        let john = find_book(&bible.nt, "John");
+        let john_ch11 = find_chapter(john, "11");
+        let john_11_35 = find_verse(john_ch11, "35");
+        assert_eq!(john_11_35.text, "Jesus wept.");
+        assert!(
+            john_11_35.text.len() < 20,
+            "Shortest verse should be very short"
+        );
 
         // Check that no verses are empty
-        for (book_name, chapters) in bible.ot.iter() {
-            for (chapter_num, verses) in chapters.iter() {
-                for (verse_num, text) in verses.iter() {
+        for book in bible.ot.iter() {
+            for chapter in book.chapters.iter() {
+                for verse in chapter.verses.iter() {
                     assert!(
-                        !text.is_empty(),
+                        !verse.text.is_empty(),
                         "Empty verse found in OT {} {}:{}",
-                        book_name,
-                        chapter_num,
-                        verse_num
+                        book.name,
+                        chapter.number,
+                        verse.number
                     );
                     assert!(
-                        text.len() >= 2,
+                        verse.text.len() >= 2,
                         "Suspiciously short verse in OT {} {}:{}: '{}'",
-                        book_name,
-                        chapter_num,
-                        verse_num,
-                        text
+                        book.name,
+                        chapter.number,
+                        verse.number,
+                        verse.text
                     );
                 }
             }
         }
 
-        for (book_name, chapters) in bible.nt.iter() {
-            for (chapter_num, verses) in chapters.iter() {
-                for (verse_num, text) in verses.iter() {
+        for book in bible.nt.iter() {
+            for chapter in book.chapters.iter() {
+                for verse in chapter.verses.iter() {
                     assert!(
-                        !text.is_empty(),
+                        !verse.text.is_empty(),
                         "Empty verse found in NT {} {}:{}",
-                        book_name,
-                        chapter_num,
-                        verse_num
+                        book.name,
+                        chapter.number,
+                        verse.number
                     );
                     assert!(
-                        text.len() >= 2,
+                        verse.text.len() >= 2,
                         "Suspiciously short verse in NT {} {}:{}: '{}'",
-                        book_name,
-                        chapter_num,
-                        verse_num,
-                        text
+                        book.name,
+                        chapter.number,
+                        verse.number,
+                        verse.text
                     );
                 }
             }
@@ -720,11 +907,13 @@ mod tests {
 
         // Check some longer verses
         // Esther 8:9 is one of the longest verses
-        let long_verse = &bible.ot["Esther"]["8"]["9"];
+        let esther = find_book(&bible.ot, "Esther");
+        let esther_ch8 = find_chapter(esther, "8");
+        let esther_8_9 = find_verse(esther_ch8, "9");
         assert!(
-            long_verse.len() > 300,
+            esther_8_9.text.len() > 300,
             "Esther 8:9 should be a long verse (>300 chars), got {}",
-            long_verse.len()
+            esther_8_9.text.len()
         );
 
         Ok(())
