@@ -271,7 +271,7 @@ fn parse_gutenberg(txt: &str) -> Bible {
             if (book_name == "1 Kings" || book_name == "2 Kings")
                 && current_book
                     .as_ref()
-                    .map_or(false, |b| b.name.contains("Samuel"))
+                    .is_some_and(|b| b.name.contains("Samuel"))
                 && current_verse.is_none()
             {
                 eprintln!(
@@ -290,18 +290,16 @@ fn parse_gutenberg(txt: &str) -> Bible {
             }
 
             // Save previous verse if exists
-            if let Some(verse) = current_verse.take() {
-                if let Some(chapter) = current_chapter.as_mut() {
+            if let Some(verse) = current_verse.take()
+                && let Some(chapter) = current_chapter.as_mut() {
                     chapter.verses.push(verse);
                 }
-            }
 
             // Save previous chapter if exists
-            if let Some(chapter) = current_chapter.take() {
-                if let Some(book) = current_book.as_mut() {
+            if let Some(chapter) = current_chapter.take()
+                && let Some(book) = current_book.as_mut() {
                     book.chapters.push(chapter);
                 }
-            }
 
             // Save previous book if exists
             if let Some(book) = current_book.take() {
@@ -325,8 +323,8 @@ fn parse_gutenberg(txt: &str) -> Bible {
         let mut found_verse_ref = false;
 
         for (i, word) in words.iter().enumerate() {
-            if let Some((ch, v)) = word.split_once(':') {
-                if ch.parse::<u32>().is_ok() && v.parse::<u32>().is_ok() {
+            if let Some((ch, v)) = word.split_once(':')
+                && ch.parse::<u32>().is_ok() && v.parse::<u32>().is_ok() {
                     // Found a verse reference!
 
                     // First, save the previous verse if we have one
@@ -348,14 +346,13 @@ fn parse_gutenberg(txt: &str) -> Bible {
                     let chapter_num = ch.to_string();
                     if current_chapter
                         .as_ref()
-                        .map_or(true, |c| c.number != chapter_num)
+                        .is_none_or(|c| c.number != chapter_num)
                     {
                         // Save the previous chapter if exists
-                        if let Some(chapter) = current_chapter.take() {
-                            if let Some(book) = current_book.as_mut() {
+                        if let Some(chapter) = current_chapter.take()
+                            && let Some(book) = current_book.as_mut() {
                                 book.chapters.push(chapter);
                             }
-                        }
                         current_chapter = Some(Chapter {
                             number: chapter_num,
                             verses: Vec::new(),
@@ -377,33 +374,29 @@ fn parse_gutenberg(txt: &str) -> Bible {
                     found_verse_ref = true;
                     break;
                 }
-            }
         }
 
         // If no verse reference found, this is continuation text for current verse
-        if !found_verse_ref {
-            if let Some(verse) = current_verse.as_mut() {
+        if !found_verse_ref
+            && let Some(verse) = current_verse.as_mut() {
                 if !verse.text.is_empty() {
                     verse.text.push(' ');
                 }
                 verse.text.push_str(line);
             }
-        }
     }
 
     // Save the last verse
-    if let Some(verse) = current_verse.take() {
-        if let Some(chapter) = current_chapter.as_mut() {
+    if let Some(verse) = current_verse.take()
+        && let Some(chapter) = current_chapter.as_mut() {
             chapter.verses.push(verse);
         }
-    }
 
     // Save the last chapter
-    if let Some(chapter) = current_chapter.take() {
-        if let Some(book) = current_book.as_mut() {
+    if let Some(chapter) = current_chapter.take()
+        && let Some(book) = current_book.as_mut() {
             book.chapters.push(chapter);
         }
-    }
 
     // Save the last book
     if let Some(book) = current_book.take() {
@@ -496,7 +489,7 @@ mod tests {
         testament
             .iter()
             .find(|b| b.name == name)
-            .expect(&format!("Book {} not found", name))
+            .unwrap_or_else(|| panic!("Book {} not found", name))
     }
 
     // Helper function to find a chapter by number
@@ -504,7 +497,7 @@ mod tests {
         book.chapters
             .iter()
             .find(|c| c.number == number)
-            .expect(&format!("Chapter {} not found in {}", number, book.name))
+            .unwrap_or_else(|| panic!("Chapter {} not found in {}", number, book.name))
     }
 
     // Helper function to find a verse by number
@@ -513,7 +506,7 @@ mod tests {
             .verses
             .iter()
             .find(|v| v.number == number)
-            .expect(&format!("Verse {} not found", number))
+            .unwrap_or_else(|| panic!("Verse {} not found", number))
     }
 
     // if not exists we write the binary
