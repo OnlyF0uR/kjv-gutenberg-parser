@@ -291,15 +291,17 @@ fn parse_gutenberg(txt: &str) -> Bible {
 
             // Save previous verse if exists
             if let Some(verse) = current_verse.take()
-                && let Some(chapter) = current_chapter.as_mut() {
-                    chapter.verses.push(verse);
-                }
+                && let Some(chapter) = current_chapter.as_mut()
+            {
+                chapter.verses.push(verse);
+            }
 
             // Save previous chapter if exists
             if let Some(chapter) = current_chapter.take()
-                && let Some(book) = current_book.as_mut() {
-                    book.chapters.push(chapter);
-                }
+                && let Some(book) = current_book.as_mut()
+            {
+                book.chapters.push(chapter);
+            }
 
             // Save previous book if exists
             if let Some(book) = current_book.take() {
@@ -320,83 +322,110 @@ fn parse_gutenberg(txt: &str) -> Bible {
 
         // Look for verse references anywhere in the line
         let words: Vec<&str> = line.split_whitespace().collect();
-        let mut found_verse_ref = false;
 
+        // First, find all verse references in this line
+        let mut verse_positions: Vec<(usize, String, String)> = Vec::new();
         for (i, word) in words.iter().enumerate() {
             if let Some((ch, v)) = word.split_once(':')
-                && ch.parse::<u32>().is_ok() && v.parse::<u32>().is_ok() {
-                    // Found a verse reference!
-
-                    // First, save the previous verse if we have one
-                    if let Some(mut verse) = current_verse.take() {
-                        // Append any text before this verse reference to the current verse
-                        if i > 0 {
-                            if !verse.text.is_empty() {
-                                verse.text.push(' ');
-                            }
-                            verse.text.push_str(&words[..i].join(" "));
-                        }
-
-                        if let Some(chapter) = current_chapter.as_mut() {
-                            chapter.verses.push(verse);
-                        }
-                    }
-
-                    // Check if we need a new chapter
-                    let chapter_num = ch.to_string();
-                    if current_chapter
-                        .as_ref()
-                        .is_none_or(|c| c.number != chapter_num)
-                    {
-                        // Save the previous chapter if exists
-                        if let Some(chapter) = current_chapter.take()
-                            && let Some(book) = current_book.as_mut() {
-                                book.chapters.push(chapter);
-                            }
-                        current_chapter = Some(Chapter {
-                            number: chapter_num,
-                            verses: Vec::new(),
-                        });
-                    }
-
-                    // Start the new verse
-                    let verse_text = if i + 1 < words.len() {
-                        words[i + 1..].join(" ")
-                    } else {
-                        String::new()
-                    };
-
-                    current_verse = Some(Verse {
-                        number: v.to_string(),
-                        text: verse_text,
-                    });
-
-                    found_verse_ref = true;
-                    break;
-                }
+                && ch.parse::<u32>().is_ok()
+                && v.parse::<u32>().is_ok()
+            {
+                verse_positions.push((i, ch.to_string(), v.to_string()));
+            }
         }
 
-        // If no verse reference found, this is continuation text for current verse
-        if !found_verse_ref
-            && let Some(verse) = current_verse.as_mut() {
+        if !verse_positions.is_empty() {
+            // Process each verse reference found
+            for (idx, (word_pos, ch, v)) in verse_positions.iter().enumerate() {
+                // Before processing this verse, handle the previous verse
+                if let Some(mut verse) = current_verse.take() {
+                    // If this is the first verse ref on this line and there's text before it
+                    if idx == 0 && *word_pos > 0 {
+                        // Text before the first verse ref belongs to the previous verse
+                        if !verse.text.is_empty() {
+                            verse.text.push(' ');
+                        }
+                        verse.text.push_str(&words[..*word_pos].join(" "));
+                    }
+
+                    // Debug output for Matthew 14
+                    if current_chapter.as_ref().is_some_and(|c| c.number == "14")
+                        && current_book.as_ref().is_some_and(|b| b.name == "Matthew")
+                    {
+                        eprintln!("Saving verse {}: '{}'", verse.number, verse.text);
+                    }
+
+                    if let Some(chapter) = current_chapter.as_mut() {
+                        chapter.verses.push(verse);
+                    }
+                }
+
+                // Check if we need a new chapter
+                if current_chapter.as_ref().is_none_or(|c| c.number != *ch) {
+                    // Save the previous chapter if exists
+                    if let Some(chapter) = current_chapter.take()
+                        && let Some(book) = current_book.as_mut()
+                    {
+                        book.chapters.push(chapter);
+                    }
+                    current_chapter = Some(Chapter {
+                        number: ch.clone(),
+                        verses: Vec::new(),
+                    });
+                }
+
+                // Determine the text for this verse
+                // It's from after this verse ref until the next verse ref (or end of line)
+                let text_start = word_pos + 1;
+                let text_end = if idx + 1 < verse_positions.len() {
+                    verse_positions[idx + 1].0
+                } else {
+                    words.len()
+                };
+
+                let verse_text = if text_start < text_end {
+                    words[text_start..text_end].join(" ")
+                } else {
+                    String::new()
+                };
+
+                // Debug output for Matthew 14
+                if ch == "14" && current_book.as_ref().is_some_and(|b| b.name == "Matthew") {
+                    eprintln!(
+                        "Creating verse {} with text: '{}' (positions {} to {})",
+                        v, verse_text, text_start, text_end
+                    );
+                }
+
+                current_verse = Some(Verse {
+                    number: v.clone(),
+                    text: verse_text,
+                });
+            }
+        } else {
+            // No verse reference found, this is continuation text for current verse
+            if let Some(verse) = current_verse.as_mut() {
                 if !verse.text.is_empty() {
                     verse.text.push(' ');
                 }
                 verse.text.push_str(line);
             }
+        }
     }
 
     // Save the last verse
     if let Some(verse) = current_verse.take()
-        && let Some(chapter) = current_chapter.as_mut() {
-            chapter.verses.push(verse);
-        }
+        && let Some(chapter) = current_chapter.as_mut()
+    {
+        chapter.verses.push(verse);
+    }
 
     // Save the last chapter
     if let Some(chapter) = current_chapter.take()
-        && let Some(book) = current_book.as_mut() {
-            book.chapters.push(chapter);
-        }
+        && let Some(book) = current_book.as_mut()
+    {
+        book.chapters.push(chapter);
+    }
 
     // Save the last book
     if let Some(book) = current_book.take() {
@@ -588,6 +617,56 @@ mod tests {
             matt_3_1.text,
             "In those days came John the Baptist, preaching in the wilderness of Judaea,"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn verify_matthew_14_verses() -> Result<(), Box<dyn std::error::Error>> {
+        let bible = get_bible();
+        let matthew = find_book(&bible.nt, "Matthew");
+        let matt_ch14 = find_chapter(matthew, "14");
+
+        // Verify verse 1
+        let matt_14_1 = find_verse(matt_ch14, "1");
+        assert_eq!(
+            matt_14_1.text,
+            "At that time Herod the tetrarch heard of the fame of Jesus,"
+        );
+
+        // Verify verse 2 exists and has correct content
+        let matt_14_2 = find_verse(matt_ch14, "2");
+        assert_eq!(
+            matt_14_2.text,
+            "And said unto his servants, This is John the Baptist; he is risen from the dead; and therefore mighty works do shew forth themselves in him."
+        );
+
+        // Verify verse 3
+        let matt_14_3 = find_verse(matt_ch14, "3");
+        assert_eq!(
+            matt_14_3.text,
+            "For Herod had laid hold on John, and bound him, and put him in prison for Herodias’ sake, his brother Philip’s wife."
+        );
+
+        // Make sure we have all verses in Matthew 14 (should have 36 verses)
+        assert_eq!(
+            matt_ch14.verses.len(),
+            36,
+            "Matthew 14 should have 36 verses"
+        );
+
+        // Verify all verse numbers are sequential
+        for i in 1..=36 {
+            let verse = find_verse(matt_ch14, &i.to_string());
+            assert_eq!(
+                verse.number,
+                i.to_string(),
+                "Verse {} should have number {}",
+                i,
+                i
+            );
+            assert!(!verse.text.is_empty(), "Verse {} should not be empty", i);
+        }
 
         Ok(())
     }
